@@ -289,6 +289,9 @@ class FireballShader:
         vec3 gradient(float value) {{
             vec4 start = vec4(0.0, a, b, c);
             vec4 end = vec4(a, b, c, 1.0);
+            
+            
+
             vec4 mixValue = smoothstep(start, end, vec4(value));
             
             vec3 color = mix(color1, color2, mixValue.x);
@@ -364,19 +367,16 @@ class FireballShader:
 
         # Generate simple coherent 3D RGBA noise (per-channel randomized)
         def generate_rgba_noise_3d(size):
-            z, y, x = np.mgrid[0:size, 0:size, 0:size]
             # Random per-channel 3D noise
             noise = np.random.rand(size, size, size, 4).astype(np.float32)
 
-            # Smooth it using gaussian-like averaging kernel or interpolation
-            from scipy.ndimage import gaussian_filter
-            for c in range(4):
-                noise[..., c] = gaussian_filter(noise[..., c], sigma=1)
+            
 
             # Normalize each channel to 0–255 uint8
             noise -= noise.min()
             noise /= noise.max()
             noise *= 255
+           
             return noise.astype(np.uint8)
 
         # Generate the noise
@@ -448,7 +448,6 @@ class FireballShader:
 
        
 
-        self.ctx.enable(moderngl.BLEND)
         
         # Render Buffer B (moves fluid based on Buffer A and previous Buffer C)
         buffer_b_fbo_next.use()
@@ -476,7 +475,6 @@ class FireballShader:
         buffer_c_tex_next.use(1)  # iChannel1 - current Buffer C
         self.vao_image.render()
 
-        self.ctx.disable(moderngl.BLEND)
         
         # Update frame counter
         self.frame_count += 1
