@@ -109,6 +109,8 @@ class FireballShader:
             float ratio = iResolution.x / iResolution.y;
             vec2 uv = fragCoord / iResolution.xy;
             
+        
+
             vec2 circleCoord = uv;   
             vec2 mousePos = vec2(0.0);
             vec2 circleVelocity = vec2(0.0);
@@ -129,13 +131,14 @@ class FireballShader:
             vec4 masksOUT = vec4(0.06, 0.0, 0.0, 0.0);
             vec4 masksValue = vec4(circle, circle, bottom, bottom);
             vec4 masks = smoothstep(masksIN, masksOUT, masksValue);
-            vec2 mask = masks.xy + masks.zw;
             
+            vec2 mask = masks.xy;  // Remove + masks.zw
+
             vec4 noise = GetNoise(uv, ratio);
                 
             vec2 force = circleCoord * noise.xy * circleForceAmount * masks.x;
-            force += (noise.xy - 0.5) * (masks.x * randomForceAmount.x + masks.z * randomForceAmount.y);
-            force.y += (0.25 + 0.75 * noise.z) * (masks.x * upForce.x + masks.z * upForce.y);
+            force += (noise.xy - 0.5) * masks.x * randomForceAmount.x;  // Remove masks.z term
+            force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x;  
             force = EncodeForce(force);
             
             fragColor = vec4(force.x, force.y, mask.x, mask.y);
@@ -327,12 +330,17 @@ class FireballShader:
             fragColor = vec4(color, 1.0);
         }}
         """
+
+        screen_frag = open("screen_frag.glsl").read()
+        screen_vert = open("screen_vert.glsl").read()
         
         # Create shader programs
         self.buffer_a_program = self.ctx.program(vertex_shader=vertex_shader, fragment_shader=buffer_a_frag)
         self.buffer_b_program = self.ctx.program(vertex_shader=vertex_shader, fragment_shader=buffer_b_frag)
         self.buffer_c_program = self.ctx.program(vertex_shader=vertex_shader, fragment_shader=buffer_c_frag)
         self.image_program = self.ctx.program(vertex_shader=vertex_shader, fragment_shader=image_frag)
+        self.to_screen_program = self.ctx.program(vertex_shader=screen_vert, fragment_shader=screen_frag)
+
         
     def setup_buffers(self):
         # Create textures for each buffer (double buffering for feedback)
@@ -368,22 +376,18 @@ class FireballShader:
         # Generate simple coherent 3D RGBA noise (per-channel randomized)
         def generate_rgba_noise_3d(size):
             # Random per-channel 3D noise
-            noise = np.random.rand(size, size, size, 4).astype(np.float32)
+            noise = np.random.randint(0,256,(size,size,size,4),dtype = np.uint8)
 
-            
-
-            # Normalize each channel to 0–255 uint8
-            noise -= noise.min()
-            noise /= noise.max()
-            noise *= 255
-           
-            return noise.astype(np.uint8)
+            return noise 
 
         # Generate the noise
         noise_3d = generate_rgba_noise_3d(size)
 
+        noise_data = noise_3d.flatten()
+        print(noise_data)
+    
         # Upload to moderngl
-        self.noise_texture = self.ctx.texture3d((size, size, size), 4, noise_3d.tobytes(), dtype='u1')
+        self.noise_texture = self.ctx.texture3d((size, size, size), 4, data = noise_data)
         self.noise_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.noise_texture.repeat_x = True
         self.noise_texture.repeat_y = True
@@ -409,10 +413,27 @@ class FireballShader:
         self.vao_b = self.ctx.vertex_array(self.buffer_b_program, [(self.vbo, '2f', 'in_position')], self.ibo)
         self.vao_c = self.ctx.vertex_array(self.buffer_c_program, [(self.vbo, '2f', 'in_position')], self.ibo)
         self.vao_image = self.ctx.vertex_array(self.image_program, [(self.vbo, '2f', 'in_position')], self.ibo)
+        self.screen_vao = self.ctx.vertex_array(self.to_screen_program, [(self.vbo, '2f', 'in_position')], self.ibo)
     
     def update_uniforms(self, program):
         current_time = time.time() - self.start_time
-        
+
+        if program == self.buffer_a_program:
+            program['iChannel2'].value = 2
+            self.noise_texture.use(location=2)
+
+        if program == self.buffer_b_program: 
+            program['iChannel0'].value = 0
+            program['iChannel1'].value = 1
+
+        if program == self.buffer_c_program: 
+            program['iChannel1'].value = 1
+            program['iChannel2'].value = 2
+
+        if program == self.image_program:
+            program['iChannel0'].value = 0
+            program['iChannel1'].value = 1
+
         if program != self.buffer_b_program and program != self.image_program:
             program['iTime'] = current_time
         program['iResolution'] = (float(self.width), float(self.height), 1.0)
@@ -443,12 +464,8 @@ class FireballShader:
         buffer_a_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.update_uniforms(self.buffer_a_program)
-        self.noise_texture.use(2)  # iChannel2
         self.vao_a.render()
 
-       
-
-        
         # Render Buffer B (moves fluid based on Buffer A and previous Buffer C)
         buffer_b_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
@@ -456,8 +473,6 @@ class FireballShader:
         buffer_a_tex_next.use(0)  # iChannel0 - current Buffer A
         buffer_c_tex_curr.use(1)  # iChannel1 - previous Buffer C
         self.vao_b.render()
-        
-       
 
          # Render Buffer C (updates fluid based on current Buffer B)
         buffer_c_fbo_next.use()
@@ -478,6 +493,27 @@ class FireballShader:
         
         # Update frame counter
         self.frame_count += 1
+
+
+    def render_buffer_A(self):
+        curr = self.frame_count % 2
+
+        buffer_a_tex_curr = self.buffer_a_tex_0 if curr == 0 else self.buffer_a_tex_1
+        buffer_a_tex_next = self.buffer_a_tex_1 if curr == 0 else self.buffer_a_tex_0
+        buffer_a_fbo_next = self.buffer_a_fbo_1 if curr == 0 else self.buffer_a_fbo_0
+
+        buffer_a_fbo_next.use()
+        self.ctx.clear(0.0,0.0,0.0,1.0)
+        self.update_uniforms(self.buffer_a_program)
+        #self.noise_texture.use(2)
+        self.vao_a.render()
+
+        # render buffer A content to screen
+        self.ctx.screen.use()
+        self.ctx.clear(0.0,0.0,0.0,1.0)
+        buffer_a_tex_next.use()
+        self.screen_vao.render()
+
     
     def run(self):
         clock = pygame.time.Clock()
@@ -496,7 +532,8 @@ class FireballShader:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
-            
+
+            #self.render_buffer_A()
             self.render_frame()
             pygame.display.flip()
             clock.tick(60)
