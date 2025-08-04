@@ -12,16 +12,18 @@ class FireballShader:
         self.width = width
         self.height = height
         self.screen = pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
-        pygame.display.set_caption("Fireball Shader")
+        pygame.display.set_caption("Fireball Projectile")
         
         self.ctx = moderngl.create_context()
-        #self.ctx.enable(moderngl.BLEND)
-        #self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         
         self.start_time = time.time()
         self.mouse_pos = (0.0, 0.0)
-        self.mouse_pressed = False
         
+        # Game-specific variables
+        self.projectiles = []  # List of active projectiles
+        self.max_projectiles = 3  # Maximum simultaneous projectiles
+        
+        self.setup_background()
         self.setup_shaders()
         self.setup_buffers()
         self.setup_noise_texture()
@@ -64,13 +66,18 @@ class FireballShader:
         }
         """
         
-        # Buffer A - Init Fluid
+        # Modified Buffer A - Projectile System
         buffer_a_frag = f"""
         #version 330
         {common}
         uniform float iTime;
         uniform vec3 iResolution;
-        uniform vec4 iMouse;
+        uniform vec4 iProjectile1; // x,y = position, z = launch_time, w = active (1.0/0.0)
+        uniform vec4 iProjectile2;
+        uniform vec4 iProjectile3;
+        uniform vec2 iProjectileDir1; // direction vector
+        uniform vec2 iProjectileDir2;
+        uniform vec2 iProjectileDir3;
         uniform sampler3D iChannel2;
         in vec2 fragCoord;
         out vec4 fragColor;
@@ -82,7 +89,9 @@ class FireballShader:
         const float circleForceAmount = 15.0;
         const vec2 randomForceAmount = vec2(0.5, 0.75);
         const vec2 upForce = vec2(0.0, 0.8);
-        const vec2 moveSpeed = vec2(1.0, 2.0);
+        const float projectileSpeed = 10.0;
+        const float projectileLifetime = 3.0;
+        const float dissipationStart = 1.5;
         
         vec4 GetNoise(vec2 uv, float ratio) {{
             vec3 noiseCoord1;
@@ -105,47 +114,66 @@ class FireballShader:
             return noise;
         }}
         
+        vec4 ProcessProjectile(vec2 uv, float ratio, vec4 projectile, vec2 direction) {{
+            if (projectile.w < 0.5) return vec4(0.0); // Inactive projectile
+            
+            float timeSinceLaunch = iTime - projectile.z;
+            if (timeSinceLaunch > projectileLifetime) return vec4(0.0); // Expired
+            
+            // Calculate current projectile position
+            vec2 startPos = projectile.xy / iResolution.xy;
+            vec2 currentPos = startPos + direction * projectileSpeed * timeSinceLaunch * 0.1;
+            
+            // Calculate distance from current fragment to projectile
+            vec2 circleCoord = uv - currentPos;
+            circleCoord.x *= ratio;
+            float circle = length(circleCoord);
+            
+            // Create masks with dissipation over time
+            float dissipationFactor = 1.0;
+            if (timeSinceLaunch > dissipationStart) {{
+                dissipationFactor = 1.0 - smoothstep(dissipationStart, projectileLifetime, timeSinceLaunch);
+            }}
+            
+            vec4 masksIN = vec4(0.08, 0.35, 0.05, 0.2) * dissipationFactor;
+            vec4 masksOUT = vec4(0.06, 0.0, 0.0, 0.0) * dissipationFactor;
+            vec4 masksValue = vec4(circle, circle, circle, circle);
+            vec4 masks = smoothstep(masksIN, masksOUT, masksValue);
+            
+            vec2 mask = masks.xy;
+            
+            vec4 noise = GetNoise(uv, ratio);
+            
+            // Create forces pointing opposite to projectile direction (trail effect)
+            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor;
+            force += (noise.xy - 0.5) * masks.x * randomForceAmount.x * dissipationFactor;
+            force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x * dissipationFactor * 0.5;
+            
+            force = EncodeForce(force);
+            return vec4(force.x, force.y, mask.x * dissipationFactor, mask.y * dissipationFactor);
+        }}
+        
         void main() {{
             float ratio = iResolution.x / iResolution.y;
             vec2 uv = fragCoord / iResolution.xy;
             
-        
-
-            vec2 circleCoord = uv;   
-            vec2 mousePos = vec2(0.0);
-            vec2 circleVelocity = vec2(0.0);
+            // Process all active projectiles and combine their effects
+            vec4 result1 = ProcessProjectile(uv, ratio, iProjectile1, iProjectileDir1);
+            vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
+            vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
             
-            if(iMouse.z > 0.5) {{     
-                circleCoord -= iMouse.xy/iResolution.xy;
-            }} else {{
-                circleCoord -= 0.5;
-                circleCoord.xy += sin(iTime * moveSpeed) * vec2(0.35, 0.25);
-            }}
+            // Combine results (you might want to blend them differently)
+            vec4 finalResult = result1 + result2 + result3;
             
-            circleCoord.x *= ratio;
+            // Clamp to prevent overflow
+            finalResult.xy = clamp(finalResult.xy, 0.0, 1.0);
+            finalResult.zw = clamp(finalResult.zw, 0.0, 1.0);
             
-            float circle = length(circleCoord);
-            float bottom = uv.y;
-            
-            vec4 masksIN = vec4(0.08, 0.35, 0.05, 0.2);
-            vec4 masksOUT = vec4(0.06, 0.0, 0.0, 0.0);
-            vec4 masksValue = vec4(circle, circle, bottom, bottom);
-            vec4 masks = smoothstep(masksIN, masksOUT, masksValue);
-            
-            vec2 mask = masks.xy;  // Remove + masks.zw
-
-            vec4 noise = GetNoise(uv, ratio);
-                
-            vec2 force = circleCoord * noise.xy * circleForceAmount * masks.x;
-            force += (noise.xy - 0.5) * masks.x * randomForceAmount.x;  // Remove masks.z term
-            force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x;  
-            force = EncodeForce(force);
-            
-            fragColor = vec4(force.x, force.y, mask.x, mask.y);
+            fragColor = finalResult;
         }}
         """
         
-        # Buffer B - Move Fluid
+        # Buffer B - Move Fluid (unchanged)
         buffer_b_frag = f"""
         #version 330
         {common}
@@ -183,7 +211,7 @@ class FireballShader:
         }}
         """
         
-        # Buffer C - Update Fluid
+        # Buffer C - Update Fluid (unchanged)
         buffer_c_frag = f"""
         #version 330
         {common}
@@ -265,7 +293,7 @@ class FireballShader:
         }}
         """
         
-        # Final Image shader
+        # Final Image shader (unchanged)
         image_frag = f"""
         #version 330
         {common}
@@ -275,7 +303,7 @@ class FireballShader:
         uniform sampler2D iChannel1;
         in vec2 fragCoord;
         out vec4 fragColor;
-        
+
         const vec3 color1 = vec3(0.0, 0.05, 0.2);
         const vec3 color2 = vec3(0.1, 0.0, 0.1);
         const vec3 color3 = vec3(0.5, 0.15, 0.25);
@@ -288,13 +316,11 @@ class FireballShader:
         const float a = 0.125;
         const float b = 0.35;
         const float c = 0.5;
-        
+
         vec3 gradient(float value) {{
             vec4 start = vec4(0.0, a, b, c);
             vec4 end = vec4(a, b, c, 1.0);
             
-            
-
             vec4 mixValue = smoothstep(start, end, vec4(value));
             
             vec3 color = mix(color1, color2, mixValue.x);
@@ -304,7 +330,7 @@ class FireballShader:
             
             return color;
         }}
-        
+
         void main() {{
             vec2 uv = fragCoord / iResolution.xy;
             
@@ -327,12 +353,40 @@ class FireballShader:
             float NdotL = smoothstep(-0.5, 0.5, dot(normal, lightDirection));
             color += color * NdotL * lightColor;
             
+            const float redThreshold = 0.35;
+           
+            float alpha = value + glow + source.z + source.w;
+            
+            if (color.r < redThreshold){{
+                discard;
+            }}
+            
             fragColor = vec4(color, 1.0);
         }}
         """
 
-        screen_frag = open("screen_frag.glsl").read()
-        screen_vert = open("screen_vert.glsl").read()
+        screen_frag = """
+        #version 330
+        uniform sampler2D tex;
+        in vec2 fragCoord;
+        out vec4 fragColor;
+        
+        void main() {
+            vec2 uv = fragCoord / vec2(800.0, 600.0);
+            fragColor = texture(tex, uv);
+        }
+        """
+        
+        screen_vert = """
+        #version 330
+        in vec2 in_position;
+        out vec2 fragCoord;
+        
+        void main() {
+            gl_Position = vec4(in_position, 0.0, 1.0);
+            fragCoord = (in_position + 1.0) * 0.5 * vec2(800.0, 600.0);
+        }
+        """
         
         # Create shader programs
         self.buffer_a_program = self.ctx.program(vertex_shader=vertex_shader, fragment_shader=buffer_a_frag)
@@ -373,25 +427,36 @@ class FireballShader:
         import numpy as np
         size = 32
 
-        # Generate simple coherent 3D RGBA noise (per-channel randomized)
         def generate_rgba_noise_3d(size):
-            # Random per-channel 3D noise
             noise = np.random.randint(0,256,(size,size,size,4),dtype = np.uint8)
-
             return noise 
 
-        # Generate the noise
         noise_3d = generate_rgba_noise_3d(size)
-
         noise_data = noise_3d.flatten()
-        print(noise_data)
     
-        # Upload to moderngl
         self.noise_texture = self.ctx.texture3d((size, size, size), 4, data = noise_data)
         self.noise_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.noise_texture.repeat_x = True
         self.noise_texture.repeat_y = True
         self.noise_texture.repeat_z = True
+
+    
+    def setup_background(self):
+        # Create a simple gradient background if image not found
+        try:
+            from PIL import Image 
+            img = Image.open("background_test.png")
+            img_data = np.array(img)
+            self.background_tex = self.ctx.texture((img.width,img.height),4,img_data.tobytes())
+            self.background_tex.filter = (moderngl.LINEAR,moderngl.LINEAR)
+        except:
+            # Create simple gradient texture
+            gradient_data = np.zeros((self.height, self.width, 4), dtype=np.uint8)
+            for y in range(self.height):
+                gradient_data[y, :, :3] = int(y / self.height * 50)  # Dark gradient
+                gradient_data[y, :, 3] = 255
+            self.background_tex = self.ctx.texture((self.width, self.height), 4, gradient_data.tobytes())
+            self.background_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
 
     
     def setup_quad(self):
@@ -415,10 +480,62 @@ class FireballShader:
         self.vao_image = self.ctx.vertex_array(self.image_program, [(self.vbo, '2f', 'in_position')], self.ibo)
         self.screen_vao = self.ctx.vertex_array(self.to_screen_program, [(self.vbo, '2f', 'in_position')], self.ibo)
     
+    def add_projectile(self, start_pos, target_pos):
+        current_time = time.time() - self.start_time
+        
+        # Calculate direction vector
+        dx = target_pos[0] - start_pos[0]
+        dy = target_pos[1] - start_pos[1]
+        length = math.sqrt(dx*dx + dy*dy)
+        
+        if length > 0:
+            direction = (dx / length, dy / length)
+        else:
+            direction = (1.0, 0.0)  # Default direction
+        
+        # Create projectile data: (x, y, launch_time, active)
+        projectile = {
+            'position': start_pos,
+            'direction': direction,
+            'launch_time': current_time,
+            'active': True
+        }
+        
+        # Add to list (remove oldest if at capacity)
+        if len(self.projectiles) >= self.max_projectiles:
+            self.projectiles.pop(0)
+        
+        self.projectiles.append(projectile)
+    
+    def update_projectiles(self):
+        current_time = time.time() - self.start_time
+        lifetime = 3.0  # Should match shader constant
+        
+        # Remove expired projectiles
+        self.projectiles = [p for p in self.projectiles 
+                          if current_time - p['launch_time'] < lifetime]
+    
     def update_uniforms(self, program):
         current_time = time.time() - self.start_time
 
         if program == self.buffer_a_program:
+            # Update projectile uniforms
+            self.update_projectiles()
+            
+            # Set up to 3 projectiles
+            for i in range(3):
+                proj_uniform = f'iProjectile{i+1}'
+                dir_uniform = f'iProjectileDir{i+1}'
+                
+                if i < len(self.projectiles):
+                    proj = self.projectiles[i]
+                    program[proj_uniform] = (proj['position'][0], proj['position'][1], 
+                                           proj['launch_time'], 1.0)
+                    program[dir_uniform] = proj['direction']
+                else:
+                    program[proj_uniform] = (0.0, 0.0, 0.0, 0.0)  # Inactive
+                    program[dir_uniform] = (0.0, 0.0)
+            
             program['iChannel2'].value = 2
             self.noise_texture.use(location=2)
 
@@ -437,10 +554,6 @@ class FireballShader:
         if program != self.buffer_b_program and program != self.image_program:
             program['iTime'] = current_time
         program['iResolution'] = (float(self.width), float(self.height), 1.0)
-        
-        if program != self.buffer_b_program and program != self.buffer_c_program and program != self.image_program:
-            mouse_z = 1.0 if self.mouse_pressed else 0.0
-            program['iMouse'] = (self.mouse_pos[0], self.height - self.mouse_pos[1], mouse_z, 0.0)
     
     def render_frame(self):
         # Get current and next buffer indices for ping-pong
@@ -460,64 +573,50 @@ class FireballShader:
         buffer_c_tex_next = self.buffer_c_tex_1 if curr == 0 else self.buffer_c_tex_0
         buffer_c_fbo_next = self.buffer_c_fbo_1 if curr == 0 else self.buffer_c_fbo_0
         
-        # Render Buffer A (always generates new forces)
+        # Render Buffer A (projectile forces)
         buffer_a_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.update_uniforms(self.buffer_a_program)
         self.vao_a.render()
 
-        # Render Buffer B (moves fluid based on Buffer A and previous Buffer C)
+        # Render Buffer B (moves fluid)
         buffer_b_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.update_uniforms(self.buffer_b_program)
-        buffer_a_tex_next.use(0)  # iChannel0 - current Buffer A
-        buffer_c_tex_curr.use(1)  # iChannel1 - previous Buffer C
+        buffer_a_tex_next.use(0)
+        buffer_c_tex_curr.use(1)
         self.vao_b.render()
 
-         # Render Buffer C (updates fluid based on current Buffer B)
+        # Render Buffer C (updates fluid)
         buffer_c_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
         self.update_uniforms(self.buffer_c_program)
-        buffer_b_tex_next.use(1)  # iChannel1 - current Buffer B
-        self.noise_texture.use(2)  # iChannel2
+        buffer_b_tex_next.use(1)
+        self.noise_texture.use(2)
         self.vao_c.render()
        
         # Render final image to screen
         self.ctx.screen.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.update_uniforms(self.image_program)
-        buffer_a_tex_next.use(0)  # iChannel0 - current Buffer A
-        buffer_c_tex_next.use(1)  # iChannel1 - current Buffer C
+        buffer_a_tex_next.use(0)
+        buffer_c_tex_next.use(1)
         self.vao_image.render()
-
+        self.ctx.disable(moderngl.BLEND)
         
         # Update frame counter
         self.frame_count += 1
-
-
-    def render_buffer_A(self):
-        curr = self.frame_count % 2
-
-        buffer_a_tex_curr = self.buffer_a_tex_0 if curr == 0 else self.buffer_a_tex_1
-        buffer_a_tex_next = self.buffer_a_tex_1 if curr == 0 else self.buffer_a_tex_0
-        buffer_a_fbo_next = self.buffer_a_fbo_1 if curr == 0 else self.buffer_a_fbo_0
-
-        buffer_a_fbo_next.use()
-        self.ctx.clear(0.0,0.0,0.0,1.0)
-        self.update_uniforms(self.buffer_a_program)
-        #self.noise_texture.use(2)
-        self.vao_a.render()
-
-        # render buffer A content to screen
-        self.ctx.screen.use()
-        self.ctx.clear(0.0,0.0,0.0,1.0)
-        buffer_a_tex_next.use()
-        self.screen_vao.render()
-
     
     def run(self):
         clock = pygame.time.Clock()
         running = True
+        
+        print("Click to shoot fireballs!")
+        print("Press 'C' to shoot towards center")
+        print("Press 'R' to shoot random directions")
+        print("ESC to quit")
         
         while running:
             for event in pygame.event.get():
@@ -526,14 +625,28 @@ class FireballShader:
                 elif event.type == pygame.MOUSEMOTION:
                     self.mouse_pos = pygame.mouse.get_pos()
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    self.mouse_pressed = True
-                elif event.type == pygame.MOUSEBUTTONUP:
-                    self.mouse_pressed = False
+                    if event.button == 1:  # Left click
+                        # Shoot towards center
+                        center = (self.width // 2, self.height // 2)
+                        self.add_projectile(self.mouse_pos, center)
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
+                    elif event.key == pygame.K_c:
+                        # Shoot from mouse position towards center
+                        center = (self.width // 2, self.height // 2)
+                        self.add_projectile(self.mouse_pos, center)
+                    elif event.key == pygame.K_r:
+                        # Shoot in random direction from mouse position
+                        import random
+                        angle = random.random() * 2 * math.pi
+                        target_distance = 200
+                        target = (
+                            self.mouse_pos[0] + math.cos(angle) * target_distance,
+                            self.mouse_pos[1] + math.sin(angle) * target_distance
+                        )
+                        self.add_projectile(self.mouse_pos, target)
 
-            #self.render_buffer_A()
             self.render_frame()
             pygame.display.flip()
             clock.tick(60)
