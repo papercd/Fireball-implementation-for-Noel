@@ -86,7 +86,7 @@ class FireballShader:
         const float noiseSize1 = 3.3;
         const vec3 noiseSpeed2 = vec3(0.05, 0.0, -0.2);
         const float noiseSize2 = 0.8;
-        const float circleForceAmount = 15.0;
+        const float circleForceAmount = 10.0;
         const vec2 randomForceAmount = vec2(0.5, 0.75);
         const vec2 upForce = vec2(0.0, 0.8);
         const float projectileSpeed = 10.0;
@@ -628,7 +628,8 @@ class FireballShader:
                     if event.button == 1:  # Left click
                         # Shoot towards center
                         center = (self.width // 2, self.height // 2)
-                        self.add_projectile(self.mouse_pos, center)
+                        corrected_mouse_pos = (self.mouse_pos[0], self.height - self.mouse_pos[1])
+                        self.add_projectile(corrected_mouse_pos, center)
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         running = False
