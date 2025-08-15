@@ -88,8 +88,8 @@ class FireballShader:
         const float noiseSize2 = 0.8;
         const float circleForceAmount = 15.0;
         const vec2 randomForceAmount = vec2(0.5, 0.75);
-        const vec2 upForce = vec2(0.0, 0.8);
-        const float projectileSpeed = 10.0;
+        const vec2 upForce = vec2(0.0, 0.0);
+        const float projectileSpeed = 50.0;
         const float projectileLifetime = 3.0;
         const float dissipationStart = 1.5;
         
@@ -127,7 +127,7 @@ class FireballShader:
             // Calculate distance from current fragment to projectile
             vec2 circleCoord = uv - currentPos;
             circleCoord.x *= ratio;
-            float circle = length(circleCoord);
+            float circle = length(circleCoord) * 2.0;
             
             // Create masks with dissipation over time
             float dissipationFactor = 1.0;
@@ -137,7 +137,7 @@ class FireballShader:
             
             vec4 masksIN = vec4(0.08, 0.35, 0.05, 0.2) * dissipationFactor;
             vec4 masksOUT = vec4(0.06, 0.0, 0.0, 0.0) * dissipationFactor;
-            vec4 masksValue = vec4(circle, circle, circle, circle);
+            vec4 masksValue = vec4(circle, circle, uv.y, uv.y);
             vec4 masks = smoothstep(masksIN, masksOUT, masksValue);
             
             vec2 mask = masks.xy;
@@ -145,7 +145,7 @@ class FireballShader:
             vec4 noise = GetNoise(uv, ratio);
             
             // Create forces pointing opposite to projectile direction (trail effect)
-            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor;
+            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor ;
             force += (noise.xy - 0.5) * masks.x * randomForceAmount.x * dissipationFactor;
             force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x * dissipationFactor * 0.5;
             
@@ -168,6 +168,8 @@ class FireballShader:
             // Clamp to prevent overflow
             finalResult.xy = clamp(finalResult.xy, 0.0, 1.0);
             finalResult.zw = clamp(finalResult.zw, 0.0, 1.0);
+
+            
             
             fragColor = finalResult;
         }}
