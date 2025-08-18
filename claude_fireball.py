@@ -93,7 +93,8 @@ class FireballShader:
         const float projectileLifetime = 3.0;
         const float dissipationStart = 1.5;
         
-        vec4 GetNoise(vec2 uv, float ratio) {{
+        vec4 GetNoise(vec2 uv, float ratio)
+        {{
             vec3 noiseCoord1;
             noiseCoord1.xy = uv;
             noiseCoord1.x *= ratio;
@@ -113,6 +114,8 @@ class FireballShader:
             
             return noise;
         }}
+
+
         
         vec4 ProcessProjectile(vec2 uv, float ratio, vec4 projectile, vec2 direction) {{
             if (projectile.w < 0.5) return vec4(0.0); // Inactive projectile
@@ -142,28 +145,30 @@ class FireballShader:
             
             vec2 mask = masks.xy;
             
-            vec4 noise = GetNoise(uv, ratio);
+            // FIX: Use absolute UV coordinates for consistent noise sampling
+            vec4 noise = GetNoise(uv, ratio);  // This will give consistent noise across the screen
             
             // Create forces pointing opposite to projectile direction (trail effect)
-            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor ;
+            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor;
             force += (noise.xy - 0.5) * masks.x * randomForceAmount.x * dissipationFactor;
             force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x * dissipationFactor * 0.5;
             
             force = EncodeForce(force);
             return vec4(force.x, force.y, mask.x * dissipationFactor, mask.y * dissipationFactor);
         }}
-        
+                
         void main() {{
             float ratio = iResolution.x / iResolution.y;
             vec2 uv = fragCoord / iResolution.xy;
             
             // Process all active projectiles and combine their effects
             vec4 result1 = ProcessProjectile(uv, ratio, iProjectile1, iProjectileDir1);
-            vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
-            vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
+            //vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
+            //vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
             
             // Combine results (you might want to blend them differently)
-            vec4 finalResult = result1 + result2 + result3;
+            vec4 finalResult = result1;
+            //+ result2 + result3;
             
             // Clamp to prevent overflow
             finalResult.xy = clamp(finalResult.xy, 0.0, 1.0);
@@ -511,7 +516,7 @@ class FireballShader:
     
     def update_projectiles(self):
         current_time = time.time() - self.start_time
-        lifetime = 3.0  # Should match shader constant
+        lifetime = 3.0  # Should / shader constant
         
         # Remove expired projectiles
         self.projectiles = [p for p in self.projectiles 
@@ -526,6 +531,8 @@ class FireballShader:
             
             # Set up to 3 projectiles
             for i in range(3):
+                if i >0:
+                    return
                 proj_uniform = f'iProjectile{i+1}'
                 dir_uniform = f'iProjectileDir{i+1}'
                 
@@ -534,6 +541,9 @@ class FireballShader:
                     program[proj_uniform] = (proj['position'][0], proj['position'][1], 
                                            proj['launch_time'], 1.0)
                     program[dir_uniform] = proj['direction']
+
+                    print("sx: ",proj['position'][0],"sy : ",proj['position'][1],"dir: ",proj['direction'],"launch_time: ",proj['launch_time'],"iTime: ",current_time)
+
                 else:
                     program[proj_uniform] = (0.0, 0.0, 0.0, 0.0)  # Inactive
                     program[dir_uniform] = (0.0, 0.0)
@@ -581,6 +591,7 @@ class FireballShader:
         self.update_uniforms(self.buffer_a_program)
         self.vao_a.render()
 
+        """
         # Render Buffer B (moves fluid)
         buffer_b_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
@@ -607,10 +618,15 @@ class FireballShader:
         buffer_c_tex_next.use(1)
         self.vao_image.render()
         self.ctx.disable(moderngl.BLEND)
+        """
+        self.ctx.screen.use()
+        buffer_a_tex_next.use()
+        self.screen_vao.render()
         
         # Update frame counter
+        
         self.frame_count += 1
-    
+        
     def run(self):
         clock = pygame.time.Clock()
         running = True
