@@ -93,27 +93,22 @@ class FireballShader:
         const float projectileLifetime = 3.0;
         const float dissipationStart = 1.5;
         
-        vec4 GetNoise(vec2 uv, float ratio)
-        {{
-            vec3 noiseCoord1;
-            noiseCoord1.xy = uv;
-            noiseCoord1.x *= ratio;
-            noiseCoord1 += iTime * noiseSpeed1;
-            noiseCoord1 *= noiseSize1;
-            
-            vec3 noiseCoord2;
-            noiseCoord2.xy = uv;
-            noiseCoord2.x *= ratio;
-            noiseCoord2 += iTime * noiseSpeed2;
-            noiseCoord2 *= noiseSize2;
-            
-            vec4 noise1 = texture(iChannel2, noiseCoord1);
-            vec4 noise2 = texture(iChannel2, noiseCoord2);
-            
-            vec4 noise = (noise1 + noise2) / 2.0;
-            
-            return noise;
+        vec4 GetNoise(vec2 uv, float ratio) {{
+            vec2 uvr = vec2(uv.x * ratio, uv.y);
+
+            vec3 noiseCoord1 = vec3(uvr, 0.0);
+            noiseCoord1 += iTime * vec3(-0.05, 0.0, 0.2);
+            noiseCoord1 *= 3.3;
+
+            vec3 noiseCoord2 = vec3(uvr, 0.0);
+            noiseCoord2 += iTime * vec3( 0.05, 0.0,-0.2);
+            noiseCoord2 *= 0.8;
+
+            vec4 n1 = texture(iChannel2, noiseCoord1);
+            vec4 n2 = texture(iChannel2, noiseCoord2);
+            return (n1 + n2) * 0.5;
         }}
+
 
 
         
@@ -149,7 +144,7 @@ class FireballShader:
             vec4 noise = GetNoise(uv, ratio);  // This will give consistent noise across the screen
             
             // Create forces pointing opposite to projectile direction (trail effect)
-            vec2 force = -direction * noise.xy * circleForceAmount * masks.x * dissipationFactor;
+            vec2 force = circleCoord * noise.xy * circleForceAmount * masks.x * dissipationFactor;
             force += (noise.xy - 0.5) * masks.x * randomForceAmount.x * dissipationFactor;
             force.y += (0.25 + 0.75 * noise.z) * masks.x * upForce.x * dissipationFactor * 0.5;
             
@@ -163,12 +158,12 @@ class FireballShader:
             
             // Process all active projectiles and combine their effects
             vec4 result1 = ProcessProjectile(uv, ratio, iProjectile1, iProjectileDir1);
-            //vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
-            //vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
+            vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
+            vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
             
             // Combine results (you might want to blend them differently)
-            vec4 finalResult = result1;
-            //+ result2 + result3;
+            vec4 finalResult = result1 + result2 + result3;
+            
             
             // Clamp to prevent overflow
             finalResult.xy = clamp(finalResult.xy, 0.0, 1.0);
@@ -526,36 +521,31 @@ class FireballShader:
         current_time = time.time() - self.start_time
 
         if program == self.buffer_a_program:
-            # Update projectile uniforms
             self.update_projectiles()
-            
-            # Set up to 3 projectiles
+
+            # Set up to 3 projectiles; zero the rest
             for i in range(3):
-                if i >0:
-                    return
                 proj_uniform = f'iProjectile{i+1}'
-                dir_uniform = f'iProjectileDir{i+1}'
-                
+                dir_uniform  = f'iProjectileDir{i+1}'
+
                 if i < len(self.projectiles):
-                    proj = self.projectiles[i]
-                    program[proj_uniform] = (proj['position'][0], proj['position'][1], 
-                                           proj['launch_time'], 1.0)
-                    program[dir_uniform] = proj['direction']
-
-                    print("sx: ",proj['position'][0],"sy : ",proj['position'][1],"dir: ",proj['direction'],"launch_time: ",proj['launch_time'],"iTime: ",current_time)
-
+                    p = self.projectiles[i]
+                    program[proj_uniform] = (p['position'][0], p['position'][1],
+                                            p['launch_time'], 1.0)
+                    program[dir_uniform] = p['direction']
                 else:
-                    program[proj_uniform] = (0.0, 0.0, 0.0, 0.0)  # Inactive
-                    program[dir_uniform] = (0.0, 0.0)
-            
+                    program[proj_uniform] = (0.0, 0.0, 0.0, 0.0)
+                    program[dir_uniform]  = (0.0, 0.0)
+
+            # ✅ make sure noise is bound
             program['iChannel2'].value = 2
             self.noise_texture.use(location=2)
 
-        if program == self.buffer_b_program: 
+        if program == self.buffer_b_program:
             program['iChannel0'].value = 0
             program['iChannel1'].value = 1
 
-        if program == self.buffer_c_program: 
+        if program == self.buffer_c_program:
             program['iChannel1'].value = 1
             program['iChannel2'].value = 2
 
@@ -563,9 +553,12 @@ class FireballShader:
             program['iChannel0'].value = 0
             program['iChannel1'].value = 1
 
+        # ✅ these MUST run for Buffer A/C
         if program != self.buffer_b_program and program != self.image_program:
             program['iTime'] = current_time
+
         program['iResolution'] = (float(self.width), float(self.height), 1.0)
+
     
     def render_frame(self):
         # Get current and next buffer indices for ping-pong
@@ -591,7 +584,7 @@ class FireballShader:
         self.update_uniforms(self.buffer_a_program)
         self.vao_a.render()
 
-        """
+        
         # Render Buffer B (moves fluid)
         buffer_b_fbo_next.use()
         self.ctx.clear(0.0, 0.0, 0.0, 1.0)
@@ -623,6 +616,7 @@ class FireballShader:
         buffer_a_tex_next.use()
         self.screen_vao.render()
         
+        """
         # Update frame counter
         
         self.frame_count += 1
@@ -668,7 +662,7 @@ class FireballShader:
 
             self.render_frame()
             pygame.display.flip()
-            clock.tick(60)
+            clock.tick(90)
         
         pygame.quit()
 
