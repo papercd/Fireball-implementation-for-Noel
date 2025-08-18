@@ -17,12 +17,23 @@ class FireballShader:
         self.ctx = moderngl.create_context()
         
         self.start_time = time.time()
+        self.last_time = self.start_time
         self.mouse_pos = (0.0, 0.0)
         
         # Game-specific variables
         self.projectiles = []  # List of active projectiles
         self.max_projectiles = 3  # Maximum simultaneous projectiles
         
+        # Framerate independence variables
+        self.delta_time = 0.0
+        self.accumulated_time = 0.0
+        self.target_fps = 60.0  # Target simulation framerate
+        self.fixed_timestep = 1.0 / self.target_fps
+
+        self.sim_time = 0.0
+        self.sim_accum = 0.0
+        self.prime_A_once = True  # run Buffer A exactly once before full pipeline
+
         self.setup_background()
         self.setup_shaders()
         self.setup_buffers()
@@ -66,11 +77,12 @@ class FireballShader:
         }
         """
         
-        # Modified Buffer A - Projectile System
+        # Modified Buffer A - Projectile System with delta time
         buffer_a_frag = f"""
         #version 330
         {common}
         uniform float iTime;
+        uniform float iDeltaTime;
         uniform vec3 iResolution;
         uniform vec4 iProjectile1; // x,y = position, z = launch_time, w = active (1.0/0.0)
         uniform vec4 iProjectile2;
@@ -82,9 +94,7 @@ class FireballShader:
         in vec2 fragCoord;
         out vec4 fragColor;
         
-        const vec3 noiseSpeed1 = vec3(-0.05, 0.0, 0.2);
         const float noiseSize1 = 3.3;
-        const vec3 noiseSpeed2 = vec3(0.05, 0.0, -0.2);
         const float noiseSize2 = 0.8;
         const float circleForceAmount = 15.0;
         const vec2 randomForceAmount = vec2(0.5, 0.75);
@@ -93,32 +103,33 @@ class FireballShader:
         const float projectileLifetime = 3.0;
         const float dissipationStart = 1.5;
         
+        // Framerate independent noise speeds (per second)
+        const vec3 noiseSpeed1 = vec3(-0.05, 0.0, 0.2) * 60.0;
+        const vec3 noiseSpeed2 = vec3(0.05, 0.0, -0.2) * 60.0;
+        
         vec4 GetNoise(vec2 uv, float ratio) {{
             vec2 uvr = vec2(uv.x * ratio, uv.y);
 
             vec3 noiseCoord1 = vec3(uvr, 0.0);
-            noiseCoord1 += iTime * vec3(-0.05, 0.0, 0.2);
-            noiseCoord1 *= 3.3;
+            noiseCoord1 += iTime * noiseSpeed1 ;
+            noiseCoord1 *= noiseSize1;
 
             vec3 noiseCoord2 = vec3(uvr, 0.0);
-            noiseCoord2 += iTime * vec3( 0.05, 0.0,-0.2);
-            noiseCoord2 *= 0.8;
+            noiseCoord2 += iTime * noiseSpeed2 ;
+            noiseCoord2 *= noiseSize2;
 
             vec4 n1 = texture(iChannel2, noiseCoord1);
             vec4 n2 = texture(iChannel2, noiseCoord2);
             return (n1 + n2) * 0.5;
         }}
 
-
-
-        
         vec4 ProcessProjectile(vec2 uv, float ratio, vec4 projectile, vec2 direction) {{
             if (projectile.w < 0.5) return vec4(0.0); // Inactive projectile
             
             float timeSinceLaunch = iTime - projectile.z;
             if (timeSinceLaunch > projectileLifetime) return vec4(0.0); // Expired
             
-            // Calculate current projectile position
+            // Calculate current projectile position (framerate independent)
             vec2 startPos = projectile.xy / iResolution.xy;
             vec2 currentPos = startPos + direction * projectileSpeed * timeSinceLaunch * 0.1;
             
@@ -140,8 +151,7 @@ class FireballShader:
             
             vec2 mask = masks.xy;
             
-            // FIX: Use absolute UV coordinates for consistent noise sampling
-            vec4 noise = GetNoise(uv, ratio);  // This will give consistent noise across the screen
+            vec4 noise = GetNoise(uv, ratio);
             
             // Create forces pointing opposite to projectile direction (trail effect)
             vec2 force = circleCoord * noise.xy * circleForceAmount * masks.x * dissipationFactor;
@@ -161,25 +171,23 @@ class FireballShader:
             vec4 result2 = ProcessProjectile(uv, ratio, iProjectile2, iProjectileDir2);
             vec4 result3 = ProcessProjectile(uv, ratio, iProjectile3, iProjectileDir3);
             
-            // Combine results (you might want to blend them differently)
+            // Combine results
             vec4 finalResult = result1 + result2 + result3;
-            
             
             // Clamp to prevent overflow
             finalResult.xy = clamp(finalResult.xy, 0.0, 1.0);
             finalResult.zw = clamp(finalResult.zw, 0.0, 1.0);
-
-            
             
             fragColor = finalResult;
         }}
         """
         
-        # Buffer B - Move Fluid (unchanged)
+        # Buffer B - Move Fluid (with delta time)
         buffer_b_frag = f"""
         #version 330
         {common}
         uniform float iTime;
+        uniform float iDeltaTime;
         uniform vec3 iResolution;
         uniform sampler2D iChannel0;
         uniform sampler2D iChannel1;
@@ -188,8 +196,8 @@ class FireballShader:
         
         const float flow1 = 0.5;
         const float flow2 = 0.75;
-        const float speed = 0.02;
-        const float gravity = -0.15;
+        const float baseSpeed = 0.02 * 60.0; // Convert to per-second rate
+        const float gravity = -0.15 * 60.0; // Convert to per-second rate
         
         void main() {{
             float ratio = iResolution.x / iResolution.y;
@@ -198,9 +206,9 @@ class FireballShader:
          
             vec2 force = texture(iChannel1, uv).xy;
             force = DecodeForce(force);
-            force.y -= gravity;
+            force.y -= gravity * iDeltaTime; // Apply framerate independent gravity
             
-            vec2 s = vec2(speed);
+            vec2 s = vec2(baseSpeed * iDeltaTime); // Apply framerate independent speed
             s.x /= ratio;
             force *= s;
             
@@ -213,11 +221,12 @@ class FireballShader:
         }}
         """
         
-        # Buffer C - Update Fluid (unchanged)
+        # Buffer C - Update Fluid (with delta time)
         buffer_c_frag = f"""
         #version 330
         {common}
         uniform float iTime;
+        uniform float iDeltaTime;
         uniform vec3 iResolution;
         uniform sampler2D iChannel1;
         uniform sampler3D iChannel2;
@@ -228,24 +237,26 @@ class FireballShader:
         const int Yiterations = 2;
         const float sampleDistance1 = 0.006;
         const float sampleDistance2 = 0.0001;
-        const float forceDamping = 0.01;
-        const vec3 noiseSpeed1 = vec3(0.0, 0.1, 0.2);
+        const float baseForceDamping = 0.01 * 60.0; // Convert to per-second rate
         const float noiseSize1 = 2.7;
-        const vec3 noiseSpeed2 = vec3(0.0, -0.1, -0.2);
         const float noiseSize2 = 0.8;
         const float turbulenceAmount = 2.0;
+        
+        // Framerate independent noise speeds (per second)
+        const vec3 noiseSpeed1 = vec3(0.0, 0.1, 0.2) * 60.0;
+        const vec3 noiseSpeed2 = vec3(0.0, -0.1, -0.2) * 60.0;
         
         vec4 GetNoise(vec2 uv, float ratio) {{
             vec3 noiseCoord1;
             noiseCoord1.xy = uv;
             noiseCoord1.x *= ratio;
-            noiseCoord1 += iTime * noiseSpeed1;
+            noiseCoord1 += iTime * noiseSpeed1 ;
             noiseCoord1 *= noiseSize1;
             
             vec3 noiseCoord2;
             noiseCoord2.xy = uv;
             noiseCoord2.x *= ratio;
-            noiseCoord2 += iTime * noiseSpeed2;
+            noiseCoord2 += iTime * noiseSpeed2 ;
             noiseCoord2 *= noiseSize2;
             
             vec4 noise1 = texture(iChannel2, noiseCoord1);
@@ -283,7 +294,9 @@ class FireballShader:
             }}
             
             totalForce /= iterations;  
-            totalForce -= totalForce * forceDamping;
+            // Apply framerate independent damping
+            float dampingFactor = 1.0 - (baseForceDamping * iDeltaTime);
+            totalForce *= dampingFactor;
             
             float turbulence = GetNoise(uv, ratio).z - 0.5;
             turbulence *= mix(0.0, turbulenceAmount, smoothstep(0.0, 1.0, currentForceMagnitude));
@@ -295,7 +308,7 @@ class FireballShader:
         }}
         """
         
-        # Final Image shader (unchanged)
+        # Final Image shader (unchanged - no time dependencies)
         image_frag = f"""
         #version 330
         {common}
@@ -423,6 +436,20 @@ class FireballShader:
             tex.repeat_y = True
         
         # Initialize ping-pong state
+
+        # Zero-init all sim targets so first frame has deterministic state
+        for fbo in (
+            self.buffer_a_fbo_0, self.buffer_a_fbo_1,
+            self.buffer_b_fbo_0, self.buffer_b_fbo_1,
+            self.buffer_c_fbo_0, self.buffer_c_fbo_1,
+        ):
+            fbo.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.ctx.screen.use()
+
+
+
+
         self.frame_count = 0
     
     def setup_noise_texture(self):
@@ -483,7 +510,7 @@ class FireballShader:
         self.screen_vao = self.ctx.vertex_array(self.to_screen_program, [(self.vbo, '2f', 'in_position')], self.ibo)
     
     def add_projectile(self, start_pos, target_pos):
-        current_time = time.time() - self.start_time
+        current_time = self.sim_time  # Use accumulated time instead of real time
         
         # Calculate direction vector
         dx = target_pos[0] - start_pos[0]
@@ -510,55 +537,68 @@ class FireballShader:
         self.projectiles.append(projectile)
     
     def update_projectiles(self):
-        current_time = time.time() - self.start_time
-        lifetime = 3.0  # Should / shader constant
+        lifetime = 3.0  # Should match shader constant
         
         # Remove expired projectiles
-        self.projectiles = [p for p in self.projectiles 
-                          if current_time - p['launch_time'] < lifetime]
+        self.projectiles = [p for p in self.projectiles if self.sim_time - p['launch_time'] < lifetime]
+
     
-    def update_uniforms(self, program):
-        current_time = time.time() - self.start_time
+    def update_uniforms(self, program, sim_time, dt):
+        # tiny helper that ignores missing uniforms
+        def U(name, value):
+            try:
+                program[name] = value
+            except KeyError:
+                pass
 
         if program == self.buffer_a_program:
             self.update_projectiles()
-
-            # Set up to 3 projectiles; zero the rest
             for i in range(3):
                 proj_uniform = f'iProjectile{i+1}'
                 dir_uniform  = f'iProjectileDir{i+1}'
-
                 if i < len(self.projectiles):
                     p = self.projectiles[i]
-                    program[proj_uniform] = (p['position'][0], p['position'][1],
-                                            p['launch_time'], 1.0)
-                    program[dir_uniform] = p['direction']
+                    U(proj_uniform, (p['position'][0], p['position'][1], p['launch_time'], 1.0))
+                    U(dir_uniform,  p['direction'])
                 else:
-                    program[proj_uniform] = (0.0, 0.0, 0.0, 0.0)
-                    program[dir_uniform]  = (0.0, 0.0)
-
-            # ✅ make sure noise is bound
-            program['iChannel2'].value = 2
+                    U(proj_uniform, (0.0, 0.0, 0.0, 0.0))
+                    U(dir_uniform,  (0.0, 0.0))
+            U('iChannel2', 2)
             self.noise_texture.use(location=2)
 
         if program == self.buffer_b_program:
-            program['iChannel0'].value = 0
-            program['iChannel1'].value = 1
+            U('iChannel0', 0)
+            U('iChannel1', 1)
 
         if program == self.buffer_c_program:
-            program['iChannel1'].value = 1
-            program['iChannel2'].value = 2
+            U('iChannel1', 1)
+            U('iChannel2', 2)
 
         if program == self.image_program:
-            program['iChannel0'].value = 0
-            program['iChannel1'].value = 1
+            U('iChannel0', 0)
+            U('iChannel1', 1)
 
-        # ✅ these MUST run for Buffer A/C
-        if program != self.buffer_b_program and program != self.image_program:
-            program['iTime'] = current_time
+        # time / dt (only set if present)
+        U('iTime', sim_time)
+        U('iDeltaTime', dt)
 
-        program['iResolution'] = (float(self.width), float(self.height), 1.0)
+        U('iResolution', (float(self.width), float(self.height), 1.0))
 
+
+    def update_time(self):
+        """Update timing variables for framerate independence"""
+        current_time = time.time()
+        real_delta = current_time - self.last_time
+        self.last_time = current_time
+        
+        # Clamp delta time to prevent spiral of death
+        real_delta = min(real_delta, 0.05)  # Max 50ms per frame
+        
+        # Use fixed timestep accumulation for consistent simulation
+        self.accumulated_time += real_delta
+        
+        # Store actual delta for potential use
+        self.delta_time = real_delta
     
     def render_frame(self):
         # Get current and next buffer indices for ping-pong
@@ -580,14 +620,14 @@ class FireballShader:
         
         # Render Buffer A (projectile forces)
         buffer_a_fbo_next.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         self.update_uniforms(self.buffer_a_program)
         self.vao_a.render()
 
         
         # Render Buffer B (moves fluid)
         buffer_b_fbo_next.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         self.update_uniforms(self.buffer_b_program)
         buffer_a_tex_next.use(0)
         buffer_c_tex_curr.use(1)
@@ -595,7 +635,7 @@ class FireballShader:
 
         # Render Buffer C (updates fluid)
         buffer_c_fbo_next.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         self.update_uniforms(self.buffer_c_program)
         buffer_b_tex_next.use(1)
         self.noise_texture.use(2)
@@ -611,15 +651,87 @@ class FireballShader:
         buffer_c_tex_next.use(1)
         self.vao_image.render()
         self.ctx.disable(moderngl.BLEND)
-        """
-        self.ctx.screen.use()
-        buffer_a_tex_next.use()
-        self.screen_vao.render()
+
+    
         
-        """
         # Update frame counter
-        
         self.frame_count += 1
+
+    def simulate_step(self, dt):
+        # ping-pong selection (same as before)
+
+        # One-shot: run Buffer A once, then start full pipeline next tick
+        if self.prime_A_once:
+            curr = self.frame_count % 2
+            buffer_a_fbo_next = self.buffer_a_fbo_1 if curr == 0 else self.buffer_a_fbo_0
+            buffer_a_fbo_curr = self.buffer_a_fbo_0 if curr == 0 else self.buffer_a_fbo_1
+
+            buffer_a_fbo_next.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0)              # alpha=0 so no fake glow
+            self.update_uniforms(self.buffer_a_program, sim_time=self.sim_time, dt=dt)
+            self.vao_a.render()
+
+            buffer_a_fbo_curr.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0)              # alpha=0 so no fake glow
+            self.update_uniforms(self.buffer_a_program, sim_time=self.sim_time, dt=dt)
+            self.vao_a.render()
+            
+
+            self.prime_A_once = False
+            return  # don't advance frame_count; next step will run full A→B→C
+
+        curr = self.frame_count % 2
+        next_idx = (self.frame_count + 1) % 2
+
+        buffer_a_tex_next = self.buffer_a_tex_1 if curr == 0 else self.buffer_a_tex_0
+        buffer_a_fbo_next = self.buffer_a_fbo_1 if curr == 0 else self.buffer_a_fbo_0
+
+        buffer_b_tex_next = self.buffer_b_tex_1 if curr == 0 else self.buffer_b_tex_0
+        buffer_b_fbo_next = self.buffer_b_fbo_1 if curr == 0 else self.buffer_b_fbo_0
+
+        buffer_c_tex_curr = self.buffer_c_tex_0 if curr == 0 else self.buffer_c_tex_1
+        buffer_c_tex_next = self.buffer_c_tex_1 if curr == 0 else self.buffer_c_tex_0
+        buffer_c_fbo_next = self.buffer_c_fbo_1 if curr == 0 else self.buffer_c_fbo_0
+
+        # --- Buffer A ---
+        buffer_a_fbo_next.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.update_uniforms(self.buffer_a_program, sim_time=self.sim_time, dt=dt)
+        self.vao_a.render()
+
+        # --- Buffer B ---
+        buffer_b_fbo_next.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.update_uniforms(self.buffer_b_program, sim_time=self.sim_time, dt=dt)
+        buffer_a_tex_next.use(0)
+        buffer_c_tex_curr.use(1)
+        self.vao_b.render()
+
+        # --- Buffer C ---
+        buffer_c_fbo_next.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.update_uniforms(self.buffer_c_program, sim_time=self.sim_time, dt=dt)
+        buffer_b_tex_next.use(1)
+        self.noise_texture.use(2)
+        self.vao_c.render()
+
+        self.frame_count += 1  # advances the ping-pong state
+
+    def draw_frame(self):
+        # Draw final image to screen (no sim advance)
+        curr = self.frame_count % 2
+        buffer_a_tex_latest = self.buffer_a_tex_1 if curr == 0 else self.buffer_a_tex_0
+        buffer_c_tex_latest = self.buffer_c_tex_1 if curr == 0 else self.buffer_c_tex_0
+
+        self.ctx.screen.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        self.update_uniforms(self.image_program, sim_time=self.sim_time, dt=0.0)  # image shader ignores dt
+        buffer_a_tex_latest.use(0)
+        buffer_c_tex_latest.use(1)
+        self.vao_image.render()
+        self.ctx.disable(moderngl.BLEND)
         
     def run(self):
         clock = pygame.time.Clock()
@@ -629,8 +741,20 @@ class FireballShader:
         print("Press 'C' to shoot towards center")
         print("Press 'R' to shoot random directions")
         print("ESC to quit")
+        print("Framerate independent simulation enabled")
+        
+        # FPS tracking for debug
+        fps_counter = 0
+        fps_timer = time.time()
         
         while running:
+            # Update timing first
+            self.update_time()
+            self.sim_accum += self.delta_time
+
+            max_steps = 5
+            steps = 0
+            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -648,21 +772,40 @@ class FireballShader:
                     elif event.key == pygame.K_c:
                         # Shoot from mouse position towards center
                         center = (self.width // 2, self.height // 2)
-                        self.add_projectile(self.mouse_pos, center)
+                        corrected_mouse_pos = (self.mouse_pos[0], self.height - self.mouse_pos[1])
+                        self.add_projectile(corrected_mouse_pos, center)
                     elif event.key == pygame.K_r:
                         # Shoot in random direction from mouse position
                         import random
                         angle = random.random() * 2 * math.pi
                         target_distance = 200
+                        corrected_mouse_pos = (self.mouse_pos[0], self.height - self.mouse_pos[1])
                         target = (
-                            self.mouse_pos[0] + math.cos(angle) * target_distance,
-                            self.mouse_pos[1] + math.sin(angle) * target_distance
+                            corrected_mouse_pos[0] + math.cos(angle) * target_distance,
+                            corrected_mouse_pos[1] + math.sin(angle) * target_distance
                         )
-                        self.add_projectile(self.mouse_pos, target)
+                        self.add_projectile(corrected_mouse_pos, target)
 
-            self.render_frame()
+
+            while self.sim_accum >= self.fixed_timestep and steps < max_steps:
+                self.simulate_step(self.fixed_timestep)
+                self.sim_accum -= self.fixed_timestep
+                self.sim_time += self.fixed_timestep
+                steps += 1
+
+            self.draw_frame()
+            #self.render_frame()
             pygame.display.flip()
-            clock.tick(90)
+            
+            # FPS debugging (optional)
+            fps_counter += 1
+            if time.time() - fps_timer > 1.0:
+                print(f"FPS: {fps_counter}, Delta: {self.delta_time:.3f}s, Sim Time: {self.accumulated_time:.1f}s")
+                fps_counter = 0
+                fps_timer = time.time()
+            
+            # Limit to reasonable framerate while maintaining smooth simulation
+            clock.tick(270)  # Allow higher display framerate
         
         pygame.quit()
 
